@@ -162,8 +162,8 @@ pub(crate) use client::{
 };
 pub use config::{
     AuditLogTrackerConfig, AuditLogUploadSource, CursorPersistence, MarmotAppConfig,
-    MarmotServiceEndpoints, RelayTelemetryExportConfig, RelayTelemetryResource,
-    RelayTelemetryRuntimeConfig, RelayTelemetrySettings,
+    MarmotServiceEndpoints, RelayConnectionMode, RelayTelemetryExportConfig,
+    RelayTelemetryResource, RelayTelemetryRuntimeConfig, RelayTelemetrySettings,
 };
 pub use directory::{
     CachedIdentityProjection, DirectoryKeyPackage, MAX_CACHED_IDENTITY_PAGE_SIZE, MatchQuality,
@@ -1460,6 +1460,7 @@ impl MarmotApp {
         let relay_plane = MarmotRelayPlane::runtime_default_with_loopback(
             APP_RUNTIME_RELAY_REBUILD_LOOKBACK,
             config.allow_loopback_relay_endpoints,
+            &config.relay_connection,
         );
         let product_analytics = ProductAnalytics::default();
         product_analytics.silence(
@@ -1541,6 +1542,7 @@ impl MarmotApp {
         let relay_plane = MarmotRelayPlane::runtime_default_with_loopback(
             APP_RUNTIME_RELAY_REBUILD_LOOKBACK,
             config.allow_loopback_relay_endpoints,
+            &config.relay_connection,
         );
         let product_analytics = ProductAnalytics::default();
         product_analytics.silence(
@@ -1654,6 +1656,7 @@ impl MarmotApp {
         #[cfg(not(test))]
         let relay_plane = MarmotRelayPlane::full_history_with_loopback(
             self.config.allow_loopback_relay_endpoints,
+            &self.config.relay_connection,
         );
         self.client_with_relay_plane(label, &relay_plane, None)
             .await
