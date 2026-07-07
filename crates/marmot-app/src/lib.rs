@@ -5663,7 +5663,17 @@ impl MarmotApp {
         clients
             .entry(account_id_hex.to_owned())
             .or_insert_with(|| {
-                let client = NostrSdkClient::builder().signer(signer).build();
+                // Apply the configured relay connection (direct or SOCKS5 proxy) to
+                // the per-account publish client too, so account setup /
+                // relay-list / KeyPackage publish goes through the proxy on a
+                // censored network -- not just the shared relay plane. See
+                // `relay_plane::relay_client_options`.
+                let client = NostrSdkClient::builder()
+                    .opts(crate::relay_plane::relay_client_options(
+                        &self.config.relay_connection,
+                    ))
+                    .signer(signer)
+                    .build();
                 Arc::new(NostrSdkRelayClient::new(client))
             })
             .clone()
