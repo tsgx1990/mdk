@@ -101,6 +101,9 @@ pub(crate) struct BlossomHttpTransport {
     address_lease: Duration,
     candidate_startup_timeout: Duration,
     transfer_timeout: Duration,
+    /// moyu fork: SOCKS5 egress for every client this transport hands out;
+    /// `None` keeps upstream's direct, DNS-vetted, address-pinned clients.
+    proxy: Option<SocketAddr>,
 }
 
 impl BlossomHttpTransport {
@@ -134,7 +137,17 @@ impl BlossomHttpTransport {
             address_lease,
             candidate_startup_timeout,
             transfer_timeout,
+            proxy: None,
         }
+    }
+
+    /// moyu fork: route every client this transport builds through a SOCKS5
+    /// proxy (`Some`), or keep them direct (`None`). See
+    /// [`build_proxied_media_http_client`] for what changes on the proxied
+    /// path.
+    pub(crate) fn with_proxy(mut self, proxy: Option<SocketAddr>) -> Self {
+        self.proxy = proxy;
+        self
     }
 
     #[cfg(test)]
@@ -227,11 +240,18 @@ impl BlossomHttpTransport {
             return Ok(cached.client.clone());
         }
 
-        let allow_loopback = url.scheme() == "http"
-            && self.allow_loopback_http
-            && url.host().map(is_loopback_host).unwrap_or(false);
-        let pin = resolve_media_host_with(url, allow_loopback, &self.inner.resolver).await?;
-        let client = build_pinned_media_http_client(pin)?;
+        let client = match self.proxy {
+            // moyu fork: the proxy resolves the origin; no local lookup or pin.
+            Some(proxy) => build_proxied_media_http_client(proxy, true)?,
+            None => {
+                let allow_loopback = url.scheme() == "http"
+                    && self.allow_loopback_http
+                    && url.host().map(is_loopback_host).unwrap_or(false);
+                let pin =
+                    resolve_media_host_with(url, allow_loopback, &self.inner.resolver).await?;
+                build_pinned_media_http_client(pin)?
+            }
+        };
         *generation = Some(CachedMediaClient {
             client: client.clone(),
             expires_at: now + self.address_lease,
@@ -250,6 +270,7 @@ impl BlossomHttpTransport {
             address_lease: self.address_lease,
             candidate_startup_timeout: self.candidate_startup_timeout,
             transfer_timeout: self.transfer_timeout,
+            proxy: self.proxy,
         }
     }
 
@@ -278,6 +299,9 @@ struct BlossomBlobDescriptor {
     sha256: Option<String>,
 }
 
+/// Direct-egress convenience kept for the test suite; production callers go
+/// through [`upload_blossom_blob_via`] so the configured proxy is never lost.
+#[cfg(test)]
 pub(crate) async fn upload_blossom_blob(
     server: &str,
     blob: Bytes,
@@ -285,18 +309,43 @@ pub(crate) async fn upload_blossom_blob(
     signer: &dyn NostrSigner,
     allow_loopback_http: bool,
 ) -> Result<String, AppError> {
-    upload_blossom_blob_with_content_type(
+    upload_blossom_blob_via(
         server,
         blob,
         blob_hash_hex,
         signer,
         allow_loopback_http,
+        None,
+    )
+    .await
+}
+
+/// moyu fork: [`upload_blossom_blob`] with an explicit SOCKS5 egress
+/// (`proxy`); `None` is the direct, address-pinned upstream path.
+pub(crate) async fn upload_blossom_blob_via(
+    server: &str,
+    blob: Bytes,
+    blob_hash_hex: &str,
+    signer: &dyn NostrSigner,
+    allow_loopback_http: bool,
+    proxy: Option<SocketAddr>,
+) -> Result<String, AppError> {
+    upload_blossom_blob_with_content_type_via(
+        server,
+        blob,
+        blob_hash_hex,
+        signer,
+        allow_loopback_http,
+        proxy,
         BLOSSOM_UPLOAD_CONTENT_TYPE,
         None,
     )
     .await
 }
 
+/// Direct-egress convenience kept for the test suite; production callers go
+/// through [`upload_blossom_blob_with_content_type_via`].
+#[cfg(test)]
 pub(crate) async fn upload_blossom_blob_with_content_type(
     server: &str,
     blob: Bytes,
@@ -306,9 +355,35 @@ pub(crate) async fn upload_blossom_blob_with_content_type(
     content_type: &str,
     fallback_extension: Option<&str>,
 ) -> Result<String, AppError> {
+    upload_blossom_blob_with_content_type_via(
+        server,
+        blob,
+        blob_hash_hex,
+        signer,
+        allow_loopback_http,
+        None,
+        content_type,
+        fallback_extension,
+    )
+    .await
+}
+
+/// moyu fork: [`upload_blossom_blob_with_content_type`] with an explicit
+/// SOCKS5 egress (`proxy`); `None` is the direct, address-pinned upstream path.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn upload_blossom_blob_with_content_type_via(
+    server: &str,
+    blob: Bytes,
+    blob_hash_hex: &str,
+    signer: &dyn NostrSigner,
+    allow_loopback_http: bool,
+    proxy: Option<SocketAddr>,
+    content_type: &str,
+    fallback_extension: Option<&str>,
+) -> Result<String, AppError> {
     let (upload_url, server_host) = blossom_upload_endpoint(server)?;
     let authorization = blossom_authorization_header(signer, &server_host, blob_hash_hex).await?;
-    let client = media_http_upload_client_for_url(&upload_url, allow_loopback_http).await?;
+    let client = media_http_upload_client_for_url(&upload_url, allow_loopback_http, proxy).await?;
     let response = client
         .put(upload_url.clone())
         .timeout(MEDIA_BLOB_TRANSFER_TIMEOUT)
@@ -840,9 +915,57 @@ async fn media_http_client_for_url(
 async fn media_http_upload_client_for_url(
     url: &Url,
     allow_loopback_http: bool,
+    proxy: Option<SocketAddr>,
 ) -> Result<reqwest::Client, AppError> {
+    if let Some(proxy) = proxy {
+        // moyu fork: URL-level validation still applies; the proxy resolves
+        // and dials the origin, so there is no local lookup to pin.
+        validate_blossom_fetch_url(url, allow_loopback_http)
+            .map_err(|err| AppError::BlobStore(format!("unsafe Blossom URL: {err}")))?;
+        return build_proxied_media_http_client(proxy, false);
+    }
     let pin = resolve_pinned_media_host_for_url(url, allow_loopback_http).await?;
     build_pinned_media_upload_client(pin)
+}
+
+/// moyu fork: the media client for a configured SOCKS5 egress.
+///
+/// Mirrors the pinned builder's redirect / timeout / no-compression policy but
+/// hands the URL's host name to the proxy (`socks5h`) instead of resolving and
+/// pinning it locally: a local lookup would leak every Blossom host to the
+/// network the proxy exists to hide from. The proxy is the user's explicit
+/// egress -- the same trust the relay plane extends to it -- so vetting of the
+/// resolved origin address is delegated to it; URL-level validation still
+/// runs before this is reached. An explicit `.proxy()` also disables reqwest's
+/// system-proxy autodetection, so nothing else can redirect the connection.
+fn build_proxied_media_http_client(
+    proxy: SocketAddr,
+    apply_read_timeout: bool,
+) -> Result<reqwest::Client, AppError> {
+    let proxy = reqwest::Proxy::all(format!("socks5h://{proxy}"))
+        .map_err(|_| AppError::BlobStore("failed to configure media SOCKS5 proxy".into()))?;
+    let mut builder = reqwest::Client::builder()
+        .proxy(proxy)
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(MEDIA_HTTP_CONNECT_TIMEOUT)
+        .timeout(MEDIA_HTTP_TOTAL_TIMEOUT)
+        .no_gzip()
+        .no_brotli()
+        .no_zstd()
+        .no_deflate();
+    if apply_read_timeout {
+        builder = builder.read_timeout(MEDIA_HTTP_READ_TIMEOUT);
+    }
+    builder
+        .build()
+        .map_err(|_| AppError::BlobStore("failed to build HTTP client".into()))
+}
+
+#[cfg(test)]
+pub(super) fn build_proxied_media_http_client_for_test(
+    proxy: SocketAddr,
+) -> Result<reqwest::Client, AppError> {
+    build_proxied_media_http_client(proxy, true)
 }
 
 async fn resolve_pinned_media_host_for_url(

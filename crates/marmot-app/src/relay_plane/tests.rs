@@ -1651,7 +1651,8 @@ async fn directory_plane_with_active_subscription(
 async fn directory_sync_keeps_filter_for_subscription_created_before_later_error() {
     let relay = nostr_relay_builder::MockRelay::run().await.unwrap();
     let relay_url = relay.url().await.to_string();
-    let relay_plane = MarmotRelayPlane::full_history_with_loopback(true);
+    let relay_plane =
+        MarmotRelayPlane::full_history_with_loopback(true, &RelayConnectionMode::Direct);
     let author = "11".repeat(32);
     let subscription_id = "directory_users_0_first".to_owned();
     let plan = DirectorySyncPlan {

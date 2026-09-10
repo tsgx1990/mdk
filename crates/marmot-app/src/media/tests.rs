@@ -632,6 +632,7 @@ fn operation_policy<'a>(
         default_endpoints: endpoints,
         allowed_locator_kinds,
         allow_loopback_http,
+        proxy: None,
     }
 }
 
@@ -996,6 +997,7 @@ async fn profile_image_upload_uses_media_extension_and_accepts_test_loopback_pol
         Some(&server),
         &signing_keys(),
         true,
+        None,
     )
     .await
     .expect("profile upload should accept the explicit test loopback policy");
@@ -1019,6 +1021,7 @@ async fn profile_image_upload_rejects_cross_site_descriptor_url() {
         Some(&server),
         &signing_keys(),
         true,
+        None,
     )
     .await
     .unwrap_err();
@@ -2200,4 +2203,127 @@ fn shared_golden_v1_fixtures_parse_validate_and_round_trip_exactly() {
 #[test]
 fn shared_golden_v2_fixtures_parse_validate_and_round_trip_exactly() {
     assert_shared_media_fixture_file("imeta-v2.json");
+}
+
+// ---------------------------------------------------------------------------
+// moyu fork: SOCKS5 media egress.
+// ---------------------------------------------------------------------------
+
+/// A one-shot SOCKS5 server: no-auth greeting, one CONNECT, then it answers
+/// whatever HTTP arrives with `response`. Records the CONNECT target so a test
+/// can prove the client handed over the *host name* (ATYP 0x03) rather than
+/// resolving it locally.
+fn spawn_socks5_mock(
+    response: Vec<u8>,
+) -> (std::net::SocketAddr, Arc<std::sync::Mutex<Option<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind socks5 mock");
+    let addr = listener.local_addr().expect("socks5 mock addr");
+    let seen = Arc::new(std::sync::Mutex::new(None));
+    let seen_writer = seen.clone();
+    thread::spawn(move || {
+        let Ok((mut stream, _)) = listener.accept() else {
+            return;
+        };
+        let mut greeting = [0_u8; 2];
+        if stream.read_exact(&mut greeting).is_err() || greeting[0] != 0x05 {
+            return;
+        }
+        let mut methods = vec![0_u8; greeting[1] as usize];
+        let _ = stream.read_exact(&mut methods);
+        let _ = stream.write_all(&[0x05, 0x00]);
+        let mut request = [0_u8; 4];
+        if stream.read_exact(&mut request).is_err() {
+            return;
+        }
+        let target = match request[3] {
+            0x03 => {
+                let mut len = [0_u8; 1];
+                let _ = stream.read_exact(&mut len);
+                let mut name = vec![0_u8; len[0] as usize];
+                let _ = stream.read_exact(&mut name);
+                let mut port = [0_u8; 2];
+                let _ = stream.read_exact(&mut port);
+                format!(
+                    "domain:{}:{}",
+                    String::from_utf8_lossy(&name),
+                    u16::from_be_bytes(port)
+                )
+            }
+            0x01 => {
+                let mut raw = [0_u8; 6];
+                let _ = stream.read_exact(&mut raw);
+                format!(
+                    "ipv4:{}.{}.{}.{}:{}",
+                    raw[0],
+                    raw[1],
+                    raw[2],
+                    raw[3],
+                    u16::from_be_bytes([raw[4], raw[5]])
+                )
+            }
+            _ => {
+                let mut raw = [0_u8; 18];
+                let _ = stream.read_exact(&mut raw);
+                "ipv6".to_owned()
+            }
+        };
+        *seen_writer.lock().unwrap_or_else(|e| e.into_inner()) = Some(target);
+        let _ = stream.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]);
+        let mut http_request = [0_u8; 1024];
+        let _ = stream.read(&mut http_request);
+        let _ = stream.write_all(&response);
+    });
+    (addr, seen)
+}
+
+#[tokio::test]
+async fn proxied_media_client_hands_host_name_to_socks5_proxy() {
+    let (proxy_addr, seen_target) = spawn_socks5_mock(http_ok_response(b"via-proxy"));
+    let client = super::blossom::build_proxied_media_http_client_for_test(proxy_addr)
+        .expect("build proxied media client");
+
+    // `.invalid` can never resolve locally (RFC 2606): the request only
+    // succeeds if the client sends the name to the proxy unresolved.
+    let response = client
+        .get("http://media-origin.invalid:8080/blob.bin")
+        .send()
+        .await
+        .expect("proxied client must reach the mock proxy");
+    let body = response.bytes().await.expect("read proxied body");
+
+    assert_eq!(body.as_ref(), b"via-proxy");
+    assert_eq!(
+        seen_target
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_deref(),
+        Some("domain:media-origin.invalid:8080"),
+        "the proxy must receive the unresolved host name (socks5h), not an address"
+    );
+}
+
+#[tokio::test]
+async fn transport_with_proxy_skips_local_resolution_and_pinning() {
+    let url = Url::parse("https://media-origin.invalid/blob.bin").expect("url");
+    let proxy_addr: std::net::SocketAddr = "127.0.0.1:1080".parse().expect("addr");
+
+    // Direct mode must resolve (and therefore fail on an unresolvable host)
+    // before handing out a pinned client ...
+    let direct = BlossomHttpTransport::new(false);
+    assert!(
+        direct.client_for_url(&url).await.is_err(),
+        "direct mode resolves locally, so an unresolvable host must fail"
+    );
+
+    // ... while proxy mode never touches DNS and hands out a client whose
+    // egress is the proxy. (Its policy view keeps the proxy too.)
+    let proxied = BlossomHttpTransport::new(false).with_proxy(Some(proxy_addr));
+    assert!(proxied.client_for_url(&url).await.is_ok());
+    assert!(
+        proxied
+            .with_loopback_disabled()
+            .client_for_url(&url)
+            .await
+            .is_ok()
+    );
 }

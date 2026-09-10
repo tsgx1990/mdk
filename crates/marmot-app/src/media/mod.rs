@@ -22,9 +22,9 @@ mod crypto;
 mod group_image;
 mod host_safety;
 
-use blossom::{
-    blossom_content_hash_from_url, upload_blossom_blob, upload_blossom_blob_with_content_type,
-};
+use blossom::blossom_content_hash_from_url;
+#[cfg(test)]
+use blossom::{upload_blossom_blob, upload_blossom_blob_with_content_type};
 use crypto::{
     canonical_media_type_v1, canonical_media_type_v2, derive_media_file_key, media_aad,
     media_hash_from_reference, media_nonce_from_reference, validate_sha256_hex,
@@ -188,7 +188,7 @@ pub(crate) async fn upload_profile_image(
     server: Option<&str>,
     signer: &dyn NostrSigner,
 ) -> Result<String, AppError> {
-    upload_profile_image_with_policy(image, media_type, server, signer, false).await
+    upload_profile_image_with_policy(image, media_type, server, signer, false, None).await
 }
 
 pub(crate) async fn upload_profile_image_with_policy(
@@ -197,6 +197,7 @@ pub(crate) async fn upload_profile_image_with_policy(
     server: Option<&str>,
     signer: &dyn NostrSigner,
     allow_loopback_http: bool,
+    proxy: Option<std::net::SocketAddr>,
 ) -> Result<String, AppError> {
     if image.is_empty() {
         return Err(AppError::BlobStore("profile image cannot be empty".into()));
@@ -226,12 +227,13 @@ pub(crate) async fn upload_profile_image_with_policy(
     }
     let server = server.unwrap_or(DEFAULT_PROFILE_IMAGE_BLOSSOM_SERVER_URL);
     let hash_hex = hex::encode(Sha256::digest(image));
-    let url = upload_blossom_blob_with_content_type(
+    let url = blossom::upload_blossom_blob_with_content_type_via(
         server,
         Bytes::copy_from_slice(image),
         &hash_hex,
         signer,
         allow_loopback_http,
+        proxy,
         &media_type,
         Some(extension),
     )
@@ -522,6 +524,8 @@ pub(crate) struct MediaOperationPolicy<'a> {
     pub(crate) default_endpoints: &'a [crate::AppBlobEndpoint],
     pub(crate) allowed_locator_kinds: &'a [String],
     pub(crate) allow_loopback_http: bool,
+    /// moyu fork: SOCKS5 egress for the upload; `None` dials directly.
+    pub(crate) proxy: Option<std::net::SocketAddr>,
 }
 
 pub(crate) async fn upload_encrypted_media(
@@ -642,6 +646,7 @@ async fn upload_encrypted_media_attachment(
         &ciphertext_sha256,
         signer,
         policy.allow_loopback_http,
+        policy.proxy,
     )
     .await?;
     let reference = MediaAttachmentReference {
@@ -690,16 +695,18 @@ async fn upload_blossom_blob_with_fallback(
     encrypted_hash_hex: &str,
     signer: &dyn NostrSigner,
     allow_loopback_http: bool,
+    proxy: Option<std::net::SocketAddr>,
 ) -> Result<String, AppError> {
     let mut failures = Vec::new();
     let mut timed_out = false;
     for (idx, server) in servers.iter().enumerate() {
-        match upload_blossom_blob(
+        match blossom::upload_blossom_blob_via(
             server,
             encrypted.clone(),
             encrypted_hash_hex,
             signer,
             allow_loopback_http,
+            proxy,
         )
         .await
         {

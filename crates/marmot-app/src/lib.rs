@@ -1398,6 +1398,20 @@ impl MarmotApp {
         self.config.allow_loopback_blob_endpoints
     }
 
+    /// The SOCKS5 proxy every Blossom media transfer (attachment upload and
+    /// download, group and profile images) dials through, derived from
+    /// [`MarmotAppConfig::relay_connection`]: `None` for `Direct`.
+    ///
+    /// moyu fork: media rides the same egress as the relay plane, so a
+    /// configured proxy hides the client's address for attachments too, not
+    /// only for relay traffic (upstream builds every media client `no_proxy`).
+    pub fn media_proxy(&self) -> Option<std::net::SocketAddr> {
+        match &self.config.relay_connection {
+            crate::config::RelayConnectionMode::Direct => None,
+            crate::config::RelayConnectionMode::Socks5(addr) => Some(*addr),
+        }
+    }
+
     /// The construction-time durable transport-cursor policy every client
     /// opened from this app applies (see [`CursorPersistence`]).
     pub(crate) fn cursor_persistence(&self) -> CursorPersistence {
@@ -1651,6 +1665,7 @@ impl MarmotApp {
             .unwrap_or_else(|| {
                 MarmotRelayPlane::full_history_with_loopback(
                     self.config.allow_loopback_relay_endpoints,
+                    &self.config.relay_connection,
                 )
             });
         #[cfg(not(test))]
@@ -1757,7 +1772,8 @@ impl MarmotApp {
             transport_signer: open.signer,
             blossom_http_transport: crate::media::BlossomHttpTransport::new(
                 self.allow_loopback_blob_endpoints(),
-            ),
+            )
+            .with_proxy(self.media_proxy()),
             state: open.state,
             seen_events_index,
             pending_seen_event_count: 0,

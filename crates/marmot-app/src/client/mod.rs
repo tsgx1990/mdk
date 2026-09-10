@@ -133,6 +133,7 @@ pub(crate) struct EncryptedMediaUploadHttp {
     default_endpoints: Vec<AppBlobEndpoint>,
     allowed_locator_kinds: Vec<String>,
     allow_loopback_http: bool,
+    proxy: Option<std::net::SocketAddr>,
 }
 
 impl EncryptedMediaUploadHttp {
@@ -147,6 +148,7 @@ impl EncryptedMediaUploadHttp {
                 default_endpoints: &self.default_endpoints,
                 allowed_locator_kinds: &self.allowed_locator_kinds,
                 allow_loopback_http: self.allow_loopback_http,
+                proxy: self.proxy,
             },
         )
         .await
@@ -202,6 +204,7 @@ pub(crate) struct PreparedGroupImageUploadHttp {
     upload_secret: Zeroizing<Vec<u8>>,
     server: Option<String>,
     allow_loopback_http: bool,
+    proxy: Option<std::net::SocketAddr>,
 }
 
 impl PreparedGroupImageUploadHttp {
@@ -212,6 +215,7 @@ impl PreparedGroupImageUploadHttp {
             self.upload_secret,
             self.server.as_deref(),
             self.allow_loopback_http,
+            self.proxy,
         )
         .await
     }
@@ -1288,6 +1292,7 @@ impl AppClient {
                 upload_secret: Zeroizing::new(upload_secret),
                 server,
                 allow_loopback_http,
+                proxy: self.app.media_proxy(),
             },
         ))
     }
@@ -4063,6 +4068,7 @@ impl AppClient {
                 default_endpoints,
                 allowed_locator_kinds: policy.allowed_locator_kinds,
                 allow_loopback_http: allow_loopback,
+                proxy: self.app.media_proxy(),
             },
             EncryptedMediaUploadFinish {
                 group_id: group_id.clone(),

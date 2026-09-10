@@ -3761,6 +3761,7 @@ impl MarmotAppRuntime {
             blossom_server.or(configured_server),
             signer.as_ref(),
             self.accounts.app.allow_loopback_blob_endpoints(),
+            self.accounts.app.media_proxy(),
         )
         .await
     }

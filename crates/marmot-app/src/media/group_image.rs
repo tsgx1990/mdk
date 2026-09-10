@@ -12,9 +12,7 @@ use zeroize::Zeroizing;
 use cgka_traits::app_components::canonicalize_marmot_media_type;
 
 use super::DEFAULT_BLOSSOM_SERVER_URL;
-use super::blossom::{
-    BlossomHttpTransport, blossom_blob_url, fetch_blossom_blob_with_transport, upload_blossom_blob,
-};
+use super::blossom::{BlossomHttpTransport, blossom_blob_url, fetch_blossom_blob_with_transport};
 use crate::{AppError, AppGroupImageInput};
 
 const GROUP_IMAGE_VERSION: &str = "marmot-group-image-v1";
@@ -150,6 +148,7 @@ pub(crate) async fn upload_group_image(
         prepared.upload_secret,
         server,
         false,
+        None,
     )
     .await?;
     Ok(GroupImageUpload {
@@ -207,17 +206,19 @@ pub(crate) async fn upload_prepared_group_image(
     upload_secret: Zeroizing<Vec<u8>>,
     server: Option<&str>,
     allow_loopback_http: bool,
+    proxy: Option<std::net::SocketAddr>,
 ) -> Result<(), AppError> {
     let secret = nostr::SecretKey::from_slice(&upload_secret)
         .map_err(|_| AppError::InvalidEncryptedMedia("invalid group image upload key".into()))?;
     let upload_keys = nostr::Keys::new(secret);
     let server = server.unwrap_or(DEFAULT_BLOSSOM_SERVER_URL);
-    upload_blossom_blob(
+    super::blossom::upload_blossom_blob_via(
         server,
         Bytes::from(encrypted_blob),
         image_hash_hex,
         &upload_keys,
         allow_loopback_http,
+        proxy,
     )
     .await?;
     Ok(())
@@ -431,6 +432,7 @@ mod tests {
             prepared.upload_secret.clone(),
             Some(&url),
             true,
+            None,
         )
         .await;
         assert!(first.is_err());
@@ -440,6 +442,7 @@ mod tests {
             prepared.upload_secret,
             Some(&url),
             true,
+            None,
         )
         .await
         .unwrap();
@@ -475,6 +478,7 @@ mod tests {
                 prepared.upload_secret,
                 Some(&upload_url),
                 true,
+                None,
             )
             .await
         });
